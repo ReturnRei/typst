@@ -1,11 +1,12 @@
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::fmt::{self, Debug, Formatter};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
+use codex::Def;
 use comemo::Tracked;
 use ecow::{eco_format, EcoString, EcoVec};
 use hayagriva::archive::ArchivedStyle;
@@ -551,20 +552,20 @@ pub(super) struct Works {
 
 impl Works {
     /// Generate all citations and the whole bibliography.
-    pub fn generate(engine: &Engine) -> StrResult<Arc<Works>> {
-        Self::generate_impl(engine.routines, engine.world, engine.introspector)
+    pub fn generate(engine: &mut Engine) -> StrResult<Arc<Works>> {
+        Self::generate_impl(engine, engine.routines, engine.world, engine.introspector)
     }
 
     /// The internal implementation of [`Works::generate`].
-    #[comemo::memoize]
     fn generate_impl(
+        engine: &mut Engine,
         routines: &Routines,
         world: Tracked<dyn World + '_>,
         introspector: Tracked<Introspector>,
     ) -> StrResult<Arc<Works>> {
         let mut generator = Generator::new(routines, world, introspector)?;
         let rendered = generator.drive();
-        let works = generator.display(&rendered)?;
+        let works = generator.display(engine, &rendered)?;
         Ok(Arc::new(works))
     }
 }
@@ -747,9 +748,13 @@ impl<'a> Generator<'a> {
     }
 
     /// Displays hayagriva's output as content for the citations and references.
-    fn display(&mut self, rendered: &hayagriva::Rendered) -> StrResult<Works> {
+    fn display(
+        &mut self,
+        engine: &mut Engine,
+        rendered: &hayagriva::Rendered,
+    ) -> StrResult<Works> {
         let citations = self.display_citations(rendered)?;
-        let references = self.display_references(rendered)?;
+        let references = self.display_references(engine, rendered)?;
         let hanging_indent =
             rendered.bibliography.as_ref().is_some_and(|b| b.hanging_indent);
         Ok(Works { citations, references, hanging_indent })
@@ -811,9 +816,13 @@ impl<'a> Generator<'a> {
     #[allow(clippy::type_complexity)]
     fn display_references(
         &self,
+        engine: &mut Engine,
         rendered: &hayagriva::Rendered,
     ) -> StrResult<Option<Vec<(Option<Content>, Content)>>> {
         let Some(rendered) = &rendered.bibliography else { return Ok(None) };
+
+        // A => P1, P1, P42
+        // B => P2, P3
 
         // Determine for each citation key where it first occurred, so that we
         // can link there.
@@ -825,17 +834,31 @@ impl<'a> Generator<'a> {
         //     }
         // }
 
+        // A => P1, P42 B => P2, P3
+
         // Determine for each citation key all the occurences so that we can link back.
-        let mut all_occurrences: HashMap<_, Vec<Location>> = HashMap::new();
+        let mut all_occurrences: HashMap<_, BTreeMap<_, Location>> = HashMap::new();
         for info in &self.infos {
+            let page = info.location.page(engine);
+
             for subinfo in &info.subinfos {
                 let key = subinfo.key.resolve();
-                all_occurrences
-                    .entry(key)
-                    .or_insert_with(Vec::new)
-                    .push(info.location);
+
+                let location_at_pages =
+                    all_occurrences.entry(key).or_insert_with(Default::default);
+                if !location_at_pages.contains_key(&page) {
+                    location_at_pages.insert(page, info.location);
+                }
             }
         }
+
+        let all_occurrences = all_occurrences
+            .into_iter()
+            .map(|(k, v)| (k, v.into_values().collect::<Vec<_>>()))
+            .collect::<HashMap<_, _>>();
+
+        // A => P1, P42
+        // B => P2, P3
 
         // The location of the bibliography.
         let location = self.bibliography.location().unwrap();
