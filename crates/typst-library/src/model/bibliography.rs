@@ -817,11 +817,23 @@ impl<'a> Generator<'a> {
 
         // Determine for each citation key where it first occurred, so that we
         // can link there.
-        let mut first_occurrences = HashMap::new();
+        // let mut first_occurrences = HashMap::new();
+        // for info in &self.infos {
+        //     for subinfo in &info.subinfos {
+        //         let key = subinfo.key.resolve();
+        //         first_occurrences.entry(key).or_insert(info.location);
+        //     }
+        // }
+
+        // Determine for each citation key all the occurences so that we can link back.
+        let mut all_occurrences: HashMap<_, Vec<Location>> = HashMap::new();
         for info in &self.infos {
             for subinfo in &info.subinfos {
                 let key = subinfo.key.resolve();
-                first_occurrences.entry(key).or_insert(info.location);
+                all_occurrences
+                    .entry(key)
+                    .or_insert_with(Vec::new)
+                    .push(info.location);
             }
         }
 
@@ -844,15 +856,58 @@ impl<'a> Generator<'a> {
             let backlink = location.variant(k + 1);
 
             // Render the first field.
+            // let mut prefix = item
+            //     .first_field
+            //     .as_ref()
+            //     .map(|elem| {
+            //         let mut content =
+            //             renderer.display_elem_child(elem, &mut None, false)?;
+            //         if let Some(location) = first_occurrences.get(item.key.as_str()) {
+            //             let dest = Destination::Location(*location);
+            //             content = content.linked(dest);
+            //         }
+            //         StrResult::Ok(content)
+            //     })
+            //     .transpose()?;
+
             let mut prefix = item
                 .first_field
                 .as_ref()
                 .map(|elem| {
                     let mut content =
                         renderer.display_elem_child(elem, &mut None, false)?;
-                    if let Some(location) = first_occurrences.get(item.key.as_str()) {
-                        let dest = Destination::Location(*location);
-                        content = content.linked(dest);
+                    if let Some(locations) = all_occurrences.get(item.key.as_str()) {
+                        if locations.len() == 1 {
+                            let dest = Destination::Location(*locations.first().unwrap());
+                            content = content
+                                + TextElem::packed(" ^")
+                                    .linked(dest)
+                                    .spanned(self.bibliography.span());
+                        } else {
+                            let mut backlinks =
+                                vec![TextElem::packed(" ^")
+                                    .spanned(self.bibliography.span())];
+                            for (i, location) in locations.iter().enumerate() {
+                                let dest = Destination::Location(*location);
+                                let suffix = (b'a' + i as u8) as char;
+                                let linked_content =
+                                    TextElem::packed(format!("{}", suffix))
+                                        .linked(dest)
+                                        .spanned(self.bibliography.span());
+                                backlinks.push(linked_content);
+                            }
+                            let mut interspersed_backlinks = Vec::new();
+                            for (i, backlink) in backlinks.into_iter().enumerate() {
+                                if i > 0 {
+                                    interspersed_backlinks.push(
+                                        TextElem::packed(" ")
+                                            .spanned(self.bibliography.span()),
+                                    );
+                                }
+                                interspersed_backlinks.push(backlink);
+                            }
+                            content = content + Content::sequence(interspersed_backlinks);
+                        }
                     }
                     StrResult::Ok(content)
                 })
